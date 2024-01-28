@@ -12,6 +12,9 @@ from airflow.providers.amazon.aws.operators.s3 import S3CreateBucketOperator
 from airflow.providers.amazon.aws.transfers.local_to_s3 import (
     LocalFilesystemToS3Operator,
 )
+
+# trigger dag
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from pandas import json_normalize
 
 S3_CONN_ID = "aws_default"
@@ -25,8 +28,8 @@ BUCKET_NAME = "airflow-levy"
     tags=["holidays"],
     catchup=False,
 )
-def dag_holiday_generataor(
-    url_base: str, endpoint: str, api_key: str, country: str, year: str
+def dag_holiday_generator(
+    url_base: str, endpoint: str, api_key: str, country: str, year: list[str]
 ):
     @task(retries=3)
     def get_json_response() -> bool:
@@ -37,53 +40,54 @@ def dag_holiday_generataor(
         endpoint_str = endpoint.resolve(context)
         api_key_str = api_key.resolve(context)
         country_str = country.resolve(context)
-        year_str = year.resolve(context)
+        year_list = year.resolve(context)
 
-        response = requests.get(
-            url_base_str + endpoint_str,
-            params={"api_key": api_key_str, "country": country_str, "year": year_str},
-        )
-        response.raise_for_status()
-        logging.info(response.json())
+        logging.info(f"year_list: {year_list}")
 
-        # Save JSON data to a file
-        with open("/tmp/holidays.json", "w") as json_file:
-            json.dump(response.json()["response"]["holidays"], json_file)
+        if len(year_list) > 0:
+            for year_str in year_list:
+                response = requests.get(
+                    url_base_str + endpoint_str,
+                    params={
+                        "api_key": api_key_str,
+                        "country": country_str,
+                        "year": int(year_str),
+                    },
+                )
+                response.raise_for_status()
 
-        return True if response.json()["meta"]["code"] == 200 else False
+                # Save JSON data to a file
+                logging.info(f'writing data to /tmp/holidays_{year_str}.json')
+
+                with open(f"/tmp/holidays_{year_str}.json", "w") as json_file:
+                    json.dump(response.json()["response"]["holidays"], json_file)
+
+        return True
 
     @task()
     def write_dataframe() -> str:
         context = get_current_context()
-        year_str = year.resolve(context)
 
-        def get_holidays():
-            with open("/tmp/holidays.json", "r") as json_file:
-                holidays = json.load(json_file)
-                for holiday in holidays:
-                    yield holiday
-
-        batch_size = 1000
-        header_written = False
+        # parse all arguments into string
+        year_list = year.resolve(context)
 
         # Convert the generator to a DataFrame
-        for i, holiday in enumerate(get_holidays()):
-            dataframe = json_normalize(holiday)
+        for i, year_str in enumerate(year_list):
+            with open(f"/tmp/holidays_{year_str}.json") as json_file:
+                json_data = json.load(json_file)
+            
+            dataframe = json_normalize(json_data)
 
-            if i % batch_size == 0:
-                mode = "w" if not header_written else "a"
+            if i == 0:
                 dataframe.to_csv(
-                    f"/tmp/holidays_{year_str}.csv",
-                    index=False,
-                    mode=mode,
-                    header=not header_written,
+                    "/tmp/holidays.csv", index=False, mode="w", header=True
                 )
             else:
                 dataframe.to_csv(
-                    f"/tmp/holidays_{year_str}.csv",
+                    "/tmp/holidays.csv",
                     index=False,
                     mode="a",
-                    header=not header_written,
+                    header=False,
                 )
 
         return "done"
@@ -115,9 +119,8 @@ def dag_holiday_generataor(
 
     to_s3 = LocalFilesystemToS3Operator(
         task_id="to_s3",
-        filename="/tmp/holidays_{{params.year}}.csv",
-        dest_key=f"s3://{BUCKET_NAME}"
-        + "/{{ params.year }}/holidays_{{params.year}}.csv",
+        filename="/tmp/holidays.csv",
+        dest_key=f"s3://{BUCKET_NAME}" + "/holidays/holidays.csv",
         replace=True,
         aws_conn_id=S3_CONN_ID,
     )
@@ -125,7 +128,7 @@ def dag_holiday_generataor(
     remove_local_files = BashOperator(
         task_id="remove_local_files",
         # delete files from /tmp
-        bash_command="rm -rf /tmp/holidays_{{params.year}}.csv /tmp/holidays.json",
+        bash_command="rm -rf /tmp/holidays.csv /tmp/holidays_*.json",
     )
 
     empty = EmptyOperator(task_id="empty")
@@ -139,11 +142,19 @@ def dag_holiday_generataor(
     write_dataframe_done >> create_bucket >> to_s3 >> remove_local_files
     email_operator >> empty
 
+    run_glue_crawler = TriggerDagRunOperator(
+        task_id="run_glue_crawler",
+        trigger_dag_id="glue_operations",
+        conf={"year": year},
+    )
 
-dag_holiday_generataor(
+    remove_local_files >> run_glue_crawler
+
+
+dag_holiday_generator(
     url_base="https://calendarific.com/api/v2",
     endpoint="/holidays",
     api_key="OhB6EkvGcnYIOwBW25PrUH1u9WMyA8DK",
     country="BR",
-    year=2024,
+    year=['2024', '2023'],
 )
