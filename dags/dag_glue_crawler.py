@@ -2,7 +2,6 @@ import datetime
 
 import boto3
 from airflow.decorators import dag, task
-from airflow.operators.bash import BashOperator
 from airflow.providers.amazon.aws.hooks.base_aws import AwsBaseHook
 from airflow.providers.amazon.aws.operators.glue_crawler import GlueCrawlerOperator
 
