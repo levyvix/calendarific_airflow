@@ -20,8 +20,8 @@ from pandas import json_normalize, DataFrame, concat
 def dag_holiday_generataor(
     url_base: str, endpoint: str, api_key: str, country: str, year: str
 ):
-    @task()
-    def get_json_response():
+    @task(retries = 3)
+    def get_json_response() -> bool:
         context = get_current_context()
 
         date = context.get("ds_nodash")
@@ -49,7 +49,7 @@ def dag_holiday_generataor(
         return True if response.json()["meta"]["code"] == 200 else False
 
     @task()
-    def write_dataframe():
+    def write_dataframe() -> str:
         context = get_current_context()
         year_str = year.resolve(context)
 
@@ -59,20 +59,23 @@ def dag_holiday_generataor(
                 for holiday in holidays:
                     yield holiday
 
+
+        batch_size = 1000
+        header_written=False
         # Convert the generator to a DataFrame
         for i, holiday in enumerate(get_holidays()):
             dataframe = json_normalize(holiday)
 
-            if i == 0:
+            if i % batch_size ==  0:
+                mode = 'w' if not header_written else 'a'
                 dataframe.to_csv(
-                    f"/tmp/holidays_{year_str}.csv", index=False, mode="w", header=True
+                    f"/tmp/holidays_{year_str}.csv", index=False, mode=mode, header=not header_written
                 )
             else:
                 dataframe.to_csv(
-                    f"/tmp/holidays_{year_str}.csv", index=False, mode="a", header=False
+                    f"/tmp/holidays_{year_str}.csv", index=False, mode="a", header=not header_written
                 )
 
-        # dataframes.to_csv(f"/tmp/holidays_{year_str}.csv", index=False)
         return "done"
 
     bash_operator = BashOperator(
