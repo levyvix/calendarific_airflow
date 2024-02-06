@@ -1,9 +1,9 @@
 import airflow
-from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.decorators import dag, task
 from airflow.providers.postgres.operators.postgres import PostgresOperator
 import pendulum
+
 
 @dag(
     start_date=airflow.utils.dates.days_ago(3),
@@ -41,11 +41,13 @@ def listings():
                 if domain_code == "en" and page_title in pagenames:
                     result[page_title] = view_counts
 
-        with open('/tmp/postgres_query.sql', 'w') as f:
+        with open("/tmp/postgres_query.sql", "w") as f:
             for pagename, pageviewcount in result.items():
                 f.write(
-                    ("INSERT INTO pageview_counts (pagename, pageviewcount, datetime) "
-                     f"VALUES ('{pagename}', {pageviewcount},'{ execution_date.in_timezone('America/Sao_Paulo')}');\n")
+                    (
+                        "INSERT INTO pageview_counts (pagename, pageviewcount, datetime) "
+                        f"VALUES ('{pagename}', {pageviewcount},'{ execution_date.in_timezone('America/Sao_Paulo')}');\n"
+                    )
                 )
 
         print(result)
@@ -64,14 +66,11 @@ def listings():
         }
     )
 
-
     write_to_postgres = PostgresOperator(
         task_id="write_to_postgres",
         sql="postgres_query.sql",
         postgres_conn_id="postgres_5431",
     )
-
-
 
     get_data >> extract_data >> _fetch_pageviews >> write_to_postgres
 
